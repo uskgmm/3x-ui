@@ -1112,8 +1112,17 @@ EOF
 
     # 已有配置(重装 / 覆盖安装)不走上面的全新安装分支,订阅端口也要查一次。
     # config_subPort 只在全新安装分支里赋值,有值说明已经处理过。
+    # XUI_DB_TYPE / XUI_DB_DSN 只有全新安装选了 PostgreSQL 才在本进程里导出;重装时得从 env 文件读,
+    # 否则 PG 模式下会去写用不上的 SQLite 还报成功。放子 shell 里,不影响下面的 migrate。
     if [ -z "${config_subPort}" ]; then
-        fix_taken_subport
+        (
+            set -a
+            for f in /etc/default/x-ui /etc/sysconfig/x-ui /etc/conf.d/x-ui; do
+                [ -r "$f" ] && . "$f"
+            done
+            set +a
+            fix_taken_subport
+        )
     fi
 
     ${xui_folder}/x-ui migrate
@@ -1187,6 +1196,16 @@ read_subport() {
     echo "$v"
 }
 
+# 订阅服务是否开启。读不到时按开启算(默认值就是开启)。只有明确是 false 才输出 false。
+read_sub_enable() {
+    local v
+    v=$(${xui_folder}/x-ui setting -getSubPort true 2>/dev/null | grep -Eo 'subEnable: (true|false)' | awk '{print $2}')
+    if [ -z "$v" ] && [ "${XUI_DB_TYPE}" != "postgres" ] && [ -f /etc/x-ui/x-ui.db ] && command -v sqlite3 >/dev/null 2>&1; then
+        v=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='subEnable';" 2>/dev/null)
+    fi
+    [ "$v" = "false" ] && echo false || echo true
+}
+
 # 设订阅端口并回读确认。用法: set_subport <端口>
 # 有一版二进制收下 -subPort 却不保存、退出码还是 0,所以不能只看退出码:
 # 一律回读,对不上就直接写库,再对不上就大声报警(不报警的话用户以为装好了,其实 x-ui 在反复重启)。
@@ -1204,20 +1223,26 @@ set_subport() {
         return 0
     fi
     echo -e "${red}═══════════════════════════════════════════${plain}"
-    echo -e "${red}WARNING: subscription port is still ${got:-unknown} (wanted ${want}).${plain}"
-    echo -e "${red}Port 2096 is used by another program (usually s-ui), so x-ui will keep restarting.${plain}"
-    echo -e "${red}Fix: panel -> Settings -> Subscription -> port ${want}, or run: x-ui setting -subPort ${want} && x-ui restart${plain}"
+    if [ -z "${got}" ]; then
+        echo -e "${red}WARNING: could not read the subscription port back to verify it was set to ${want}.${plain}"
+    else
+        echo -e "${red}WARNING: subscription port is still ${got} (wanted ${want}).${plain}"
+    fi
+    echo -e "${red}Port 2096 is used by another program (usually s-ui); if the port is not ${want}, x-ui will keep restarting.${plain}"
+    echo -e "${red}Fix: panel -> Settings -> Subscription (面板 → 设置 → 订阅) -> port ${want}, then: x-ui restart${plain}"
+    echo -e "${red}  or run: ${xui_folder}/x-ui setting -subPort ${want} && x-ui restart${plain}"
+    echo -e "${red}  (PostgreSQL: first load the DB settings: set -a; . /etc/default/x-ui (or /etc/sysconfig/x-ui, /etc/conf.d/x-ui); set +a)${plain}"
     echo -e "${red}═══════════════════════════════════════════${plain}"
     return 1
 }
 
-# 端口被别的程序监听(不算 x-ui 自己)→ 返回 0。
+# 端口被别的程序监听(不算 x-ui 自己,也不算它拉起的 xray-linux-*)→ 返回 0。
 # 拿不到进程名(ss 没有 -p 信息)时按"别人占着"算,宁可挪也别撞。
 port_held_by_other() {
     local p="$1"
     local lines
     lines=$(ss -lntp 2>/dev/null | grep -E "[:.]${p}([[:space:]]|$)") || return 1
-    if echo "$lines" | grep -q 'users:' && ! echo "$lines" | grep -v '"x-ui"' | grep -q .; then
+    if echo "$lines" | grep -q 'users:' && ! echo "$lines" | grep -vE '"(x-ui|xray-linux-[^"]*)"' | grep -q .; then
         return 1
     fi
     return 0
@@ -1228,9 +1253,16 @@ port_held_by_other() {
 # 已知没覆盖的情况:探测那一刻 s-ui 正好在重启、没在监听,会判成空闲。
 fix_taken_subport() {
     local cur np
-    cur=$(read_subport)
-    [ "${cur}" = "2096" ] || return 1
+    # 2096 没被别人占就什么都不做(也不读库、不出任何提示)
     port_held_by_other 2096 || return 1
+    # 订阅服务关着就不会去占端口,不用挪
+    [ "$(read_sub_enable)" = "false" ] && return 1
+    cur=$(read_subport)
+    if [ -z "${cur}" ]; then
+        echo -e "${yellow}Note: could not read the current subscription port (old x-ui binary without sqlite3, or database unreachable) — skipped the port 2096 check.${plain}"
+        return 1
+    fi
+    [ "${cur}" = "2096" ] || return 1
     np=$(pick_free_port 2096)
     [ "${np}" != "2096" ] || return 1
     echo -e "${yellow}Port 2096 is in use (s-ui uses it too) — subscription port moved to ${np}${plain}"
