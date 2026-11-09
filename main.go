@@ -263,6 +263,13 @@ func updateTgbotSetting(tgBotToken string, tgBotChatid string, tgBotRuntime stri
 
 // updateSetting updates various panel settings including port, credentials, base path, listen IP, and two-factor authentication.
 func updateSetting(port int, subPort int, username string, password string, webBasePath string, listenIP string, resetTwoFactor bool) error {
+	// 0 = flag not given. Validate before touching the DB so a bad value
+	// changes nothing and the caller (install.sh) sees a non-zero exit.
+	if subPort < 0 || subPort > 65535 {
+		fmt.Printf("Invalid subscription port: %d (must be 1-65535)\n", subPort)
+		return fmt.Errorf("invalid subscription port %d", subPort)
+	}
+
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println("Database initialization failed:", err)
@@ -278,6 +285,16 @@ func updateSetting(port int, subPort int, username string, password string, webB
 			fmt.Println("Failed to set port:", err)
 		} else {
 			fmt.Printf("Port set successfully: %v\n", port)
+		}
+	}
+
+	var subPortErr error
+	if subPort > 0 {
+		subPortErr = settingService.SetSubPort(subPort)
+		if subPortErr != nil {
+			fmt.Println("Failed to set subscription port:", subPortErr)
+		} else {
+			fmt.Printf("Subscription port set successfully: %v\n", subPort)
 		}
 	}
 
@@ -319,7 +336,9 @@ func updateSetting(port int, subPort int, username string, password string, webB
 		}
 	}
 
-	return nil
+	// install.sh checks the exit code of `x-ui setting -subPort` and falls
+	// back to writing the DB directly, so a failed save must not look like success.
+	return subPortErr
 }
 
 // updateCert updates the SSL certificate files for the panel.
@@ -539,7 +558,7 @@ func main() {
 			}
 		} else {
 			if err = updateSetting(port, subPort, username, password, webBasePath, listenIP, resetTwoFactor); err != nil {
-				return
+				os.Exit(1)
 			}
 		}
 		if show {
