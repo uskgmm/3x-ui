@@ -821,13 +821,14 @@ set_subport() {
     return 1
 }
 
-# 端口被别的程序监听(不算 x-ui 自己,也不算它拉起的 xray-linux-*)→ 返回 0。
+# 端口被别的程序监听(不算 x-ui 自己)→ 返回 0。
+# xray 从不监听订阅端口,它占着 2096 也是真冲突,要挪。
 # 拿不到进程名(ss 没有 -p 信息)时按"别人占着"算,宁可挪也别撞。
 port_held_by_other() {
     local p="$1"
     local lines
     lines=$(ss -lntp 2>/dev/null | grep -E "[:.]${p}([[:space:]]|$)") || return 1
-    if echo "$lines" | grep -q 'users:' && ! echo "$lines" | grep -vE '"(x-ui|xray-linux-[^"]*)"' | grep -q .; then
+    if echo "$lines" | grep -q 'users:' && ! echo "$lines" | grep -v '"x-ui"' | grep -q .; then
         return 1
     fi
     return 0
