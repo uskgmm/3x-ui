@@ -1016,19 +1016,9 @@ EOF
             # 原因:-subPort 是新加的参数,而安装时下载的二进制来自 latest release ——
             # 如果 release 还没跟上,旧二进制遇到未知参数会直接报错退出。
             # 分开调用 + 吞掉失败,保证任何版本的二进制都能装完;
-            # 真没设上的话订阅端口还是默认值,面板里能改。
+            # set_subport 设完会回读,没设上就退回直接写库,还不行就大声报警。
             if [ "${config_subPort}" != "2096" ]; then
-                if ! ${xui_folder}/x-ui setting -subPort "${config_subPort}" >/dev/null 2>&1; then
-                    # 二进制太老、不认 -subPort。别就这么算了 —— 端口是被占的,
-                    # 不改的话订阅服务根本起不来,而用户此时以为已经装好了。
-                    # 退回去直接写库:x-ui setting 那几条已经跑过,表肯定建好了。
-                    if [ "${XUI_DB_TYPE}" != "postgres" ] && write_subport_to_db "${config_subPort}"; then
-                        echo -e "${green}Subscription port set to ${config_subPort} (written to database).${plain}"
-                    else
-                        echo -e "${yellow}Note: could not set the subscription port automatically.${plain}"
-                        echo -e "${yellow}Port 2096 is taken — set it to ${config_subPort} in the panel, or the subscription service won't start.${plain}"
-                    fi
-                fi
+                set_subport "${config_subPort}"
             fi
 
             echo ""
@@ -1120,6 +1110,12 @@ EOF
         fi
     fi
 
+    # 已有配置(重装 / 覆盖安装)不走上面的全新安装分支,订阅端口也要查一次。
+    # config_subPort 只在全新安装分支里赋值,有值说明已经处理过。
+    if [ -z "${config_subPort}" ]; then
+        fix_taken_subport
+    fi
+
     ${xui_folder}/x-ui migrate
 }
 
@@ -1174,6 +1170,71 @@ write_subport_to_db() {
            WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = 'subPort');" >/dev/null 2>&1 || return 1
     [ "$(sqlite3 "$db" "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null)" = "${port}" ] || return 1
     return 0
+}
+
+# 读当前订阅端口。新二进制用 -getSubPort(不动 -show 的输出,脚本和 TMS 都在 grep 它);
+# 老二进制不认这个参数,退回 sqlite3 读库(库里没有这一行 = 默认 2096)。读不到输出空。
+read_subport() {
+    local v
+    v=$(${xui_folder}/x-ui setting -getSubPort true 2>/dev/null | grep -Eo 'subPort: [0-9]+' | awk '{print $2}')
+    if [ -z "$v" ] && [ "${XUI_DB_TYPE}" != "postgres" ] && [ -f /etc/x-ui/x-ui.db ] && command -v sqlite3 >/dev/null 2>&1; then
+        if v=$(sqlite3 /etc/x-ui/x-ui.db "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null); then
+            [ -z "$v" ] && v=2096
+        else
+            v=""
+        fi
+    fi
+    echo "$v"
+}
+
+# 设订阅端口并回读确认。用法: set_subport <端口>
+# 有一版二进制收下 -subPort 却不保存、退出码还是 0,所以不能只看退出码:
+# 一律回读,对不上就直接写库,再对不上就大声报警(不报警的话用户以为装好了,其实 x-ui 在反复重启)。
+set_subport() {
+    local want="$1"
+    local got
+    ${xui_folder}/x-ui setting -subPort "${want}" >/dev/null 2>&1
+    got=$(read_subport)
+    if [ "${got}" != "${want}" ] && [ "${XUI_DB_TYPE}" != "postgres" ]; then
+        write_subport_to_db "${want}"
+        got=$(read_subport)
+    fi
+    if [ "${got}" = "${want}" ]; then
+        echo -e "${green}Subscription port set to ${want}.${plain}"
+        return 0
+    fi
+    echo -e "${red}═══════════════════════════════════════════${plain}"
+    echo -e "${red}WARNING: subscription port is still ${got:-unknown} (wanted ${want}).${plain}"
+    echo -e "${red}Port 2096 is used by another program (usually s-ui), so x-ui will keep restarting.${plain}"
+    echo -e "${red}Fix: panel -> Settings -> Subscription -> port ${want}, or run: x-ui setting -subPort ${want} && x-ui restart${plain}"
+    echo -e "${red}═══════════════════════════════════════════${plain}"
+    return 1
+}
+
+# 端口被别的程序监听(不算 x-ui 自己)→ 返回 0。
+# 拿不到进程名(ss 没有 -p 信息)时按"别人占着"算,宁可挪也别撞。
+port_held_by_other() {
+    local p="$1"
+    local lines
+    lines=$(ss -lntp 2>/dev/null | grep -E "[:.]${p}([[:space:]]|$)") || return 1
+    if echo "$lines" | grep -q 'users:' && ! echo "$lines" | grep -v '"x-ui"' | grep -q .; then
+        return 1
+    fi
+    return 0
+}
+
+# 已有配置时的订阅端口检查:库里还是 2096、而 2096 被别的程序占着(通常是 s-ui)→ 挪走。
+# 只管 2096:用户自己改过的端口不动。挪成功返回 0,没动或没挪成返回 1。
+# 已知没覆盖的情况:探测那一刻 s-ui 正好在重启、没在监听,会判成空闲。
+fix_taken_subport() {
+    local cur np
+    cur=$(read_subport)
+    [ "${cur}" = "2096" ] || return 1
+    port_held_by_other 2096 || return 1
+    np=$(pick_free_port 2096)
+    [ "${np}" != "2096" ] || return 1
+    echo -e "${yellow}Port 2096 is in use (s-ui uses it too) — subscription port moved to ${np}${plain}"
+    set_subport "${np}"
 }
 
 install_x-ui() {

@@ -482,6 +482,7 @@ func main() {
 	var show bool
 	var getCert bool
 	var getApiToken bool
+	var getSubPort bool
 	var resetTwoFactor bool
 	settingCmd.BoolVar(&reset, "reset", false, "Reset all settings")
 	settingCmd.BoolVar(&show, "show", false, "Display current settings")
@@ -495,6 +496,7 @@ func main() {
 	settingCmd.BoolVar(&getListen, "getListen", false, "Display current panel listenIP IP")
 	settingCmd.BoolVar(&getCert, "getCert", false, "Display current certificate settings")
 	settingCmd.BoolVar(&getApiToken, "getApiToken", false, "Display current API token")
+	settingCmd.BoolVar(&getSubPort, "getSubPort", false, "Display current subscription server port")
 	settingCmd.StringVar(&webCertFile, "webCert", "", "Set path to public key file for panel")
 	settingCmd.StringVar(&webKeyFile, "webCertKey", "", "Set path to private key file for panel")
 	settingCmd.StringVar(&tgbottoken, "tgbottoken", "", "Set token for Telegram bot")
@@ -572,6 +574,15 @@ func main() {
 		}
 		if getApiToken {
 			GetApiToken(getApiToken)
+		}
+		if getSubPort {
+			// Separate flag on purpose: scripts and TMS grep `-show` output, so it stays unchanged.
+			p, err := (&service.SettingService{}).GetSubPort()
+			if err != nil {
+				fmt.Println("get subPort failed, error info:", err)
+				os.Exit(1)
+			}
+			fmt.Println("subPort:", p)
 		}
 		if (tgbottoken != "") || (tgbotchatid != "") || (tgbotRuntime != "") {
 			updateTgbotSetting(tgbottoken, tgbotchatid, tgbotRuntime)
